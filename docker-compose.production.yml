@@ -1,0 +1,134 @@
+name: ai-stack
+
+networks:
+  ai-net:
+    driver: bridge
+
+volumes:
+  redis_data:
+  qdrant_data:
+  openwebui_data:
+  prometheus_data:
+  grafana_data:
+
+services:
+  # =========================
+  # ROUTER
+  # =========================
+  router:
+    build: ./router
+    container_name: ai-router
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - ai-net
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - REDIS_URL=redis://redis:6379
+      - QDRANT_URL=http://qdrant:6333
+      - AUTH_BYPASS_CIDRS=172.18.0.0/16  # Allow all Docker internal IPs
+      - EMBED_MODEL=nomic-embed-text
+      - SEMANTIC_THRESHOLD=0.9
+      - SEMANTIC_MAX_AGE_SECONDS=86400
+      # Gemini fallback configuration (Phase 2)
+      - GEMINI_API_ENDPOINT=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=gemini-2.0-flash
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - redis
+      - qdrant
+
+  # =========================
+  # OPEN WEBUI
+  # =========================
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:cuda
+    container_name: open-webui
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "8080:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://router:8000
+    volumes:
+      - openwebui_data:/app/backend/data
+    depends_on:
+      - router
+
+  # =========================
+  # REDIS
+  # =========================
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    networks:
+      - ai-net
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  # =========================
+  # QDRANT
+  # =========================
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    networks:
+      - ai-net
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+
+  # =========================
+  # PROMETHEUS
+  # =========================
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "9090:9090"
+    volumes:
+      - prometheus_data:/prometheus
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+
+  # =========================
+  # GRAFANA
+  # =========================
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards
+    env_file:
+      - .env

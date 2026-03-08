@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+httpx
+redis
+orjson
+prometheus_client
+qdrant-client
+simpleeval
+python-multipart
