@@ -1,199 +1,426 @@
 # AGENTS.md
-AI Router Stack – Production Architecture Specification (v1.1 – March 2026)
+
+AI Router Stack – Multi-Agent Architecture Specification (v2)
 
 ---
 
-## 1. System Overview (Current Production)
+# 1. System Purpose
 
-Local-first AI routing stack บน Arch Linux (Phatthalung, TH)  
-ใช้งานจริงกับสแตกต่อไปนี้:
+This repository implements a **local-first multi-agent AI system** designed to operate as a personal AI assistant similar to:
 
-- Open WebUI (Frontend + RAG + Tools) – พอร์ต 8080
-- FastAPI Router (Control Plane + Proxy) – พอร์ต 8000
-- Ollama (LLM Runtime บน host systemd) – พอร์ต 11434 (127.0.0.1)
-- Redis (L1 Cache)
-- Qdrant (L2 Semantic Cache)
-- Prometheus + Grafana (Observability)
-- Tailscale (Secure access จากทุกอุปกรณ์)
+* autonomous coding assistants
+* DevOps automation agents
+* research copilots
+* personal AI operating systems
 
-**เป้าหมายหลัก**
-- Local-first inference เป็นหลัก (Ollama host)
-- Deterministic routing + caching
-- ควบคุมค่าใช้จ่าย (Gemini เป็น fallback เท่านั้น)
-- Latency ต่ำ + observable
-- พร้อมขยายไป agentic workflows
+The system runs entirely on a **local infrastructure stack** using containerized services and open-source models.
+
+Primary goals:
+
+* autonomous task execution
+* multi-agent collaboration
+* local model inference
+* persistent memory
+* tool-enabled actions
+* secure execution environment
 
 ---
 
-## 2. High-Level Architecture (Current)
+# 2. Core Architecture
 
 ```
-User (Tailscale IP)
-    ↓
-Open WebUI (8080) ── OLLAMA_BASE_URL = http://router:8000
-    ↓
-Router (8000) ── host.docker.internal:11434
-    ├─ Redis (L1 Cache) ── sha256(prompt + model)
-    ├─ Qdrant (L2 Semantic Cache) ── nomic-embed-text
-    └─ Ollama Host (11434) ── models: qwen2.5-coder, llama3.2:1b, glm-4-flash, ...
-          └─ Gemini Fallback (free tier, low confidence only)
-```
-
-Router เป็น control plane หลักทุก request ต้องผ่านที่นี่
-
----
-
-## 3. Agent Model (Current)
-
-**Single-step Deterministic Proxy Agent**  
-Capabilities ที่ใช้งานจริง:
-- Streaming / non-streaming
-- Request hashing + L1 Redis cache
-- Semantic cache via Qdrant
-- RAG integration (ผ่าน Open WebUI)
-- Tool calling (ผ่าน Open WebUI)
-- Gemini fallback (เมื่อ confidence ต่ำ)
-
-**ยังไม่มี**
-- Autonomous planning
-- Multi-step reasoning
-- Auto model pull / syntax fix
-
----
-
-## 4. Router Responsibilities
-
-1. Protocol Adapter (Open WebUI ↔ Ollama)
-2. Cache Coordinator (L1 + L2)
-3. Model Discovery & Probe (/api/tags)
-4. Future Policy Engine + Confidence Scoring
-5. Observability Endpoint (/health, /debug/models)
-
-**Current Endpoints**
-- POST /api/generate (passthrough + cache)
-- GET /health
-- GET /debug/models (list Ollama models จาก container)
-
----
-
-## 5. Caching Strategy
-
-**L1 – Redis**  
-Key: `sha256(prompt + system_prompt + model_version)`  
-TTL: 3600s  
-Rules: cache เฉพาะ non-streaming, binary-safe (orjson)
-
-**L2 – Qdrant**  
-Purpose: semantic prompt similarity  
-Embedding: nomic-embed-text  
-Threshold dynamic (0.89–0.94 ตาม prompt length)
-
----
-
-## 6. Streaming Policy
-
-- stream=true → passthrough chunks, no cache  
-- stream=false → await full response → cache → return JSON
-
----
-
-## 7. Environment Variables (สำคัญ)
-
-```env
-OLLAMA_BASE_URL=http://host.docker.internal:11434
-REDIS_URL=redis://redis:6379/0
-QDRANT_URL=http://qdrant:6333
-GEMINI_API_KEY=AIzaSy...
-GEMINI_MODEL=gemini-2.5-flash
-ROUTER_API_KEY=...
+User
+  │
+  ▼
+Open WebUI
+  │
+  ▼
+AI Router (FastAPI)
+  │
+  ▼
+Agent Gateway
+  │
+  ▼
+Planner Agent
+  │
+  ▼
+Manager Agent
+  │
+  ▼
+CrewAI Workers
+  │
+  ├── Tool Sandbox
+  ├── Redis Memory
+  ├── Qdrant Vector Memory
+  └── Ollama LLM Runtime
 ```
 
 ---
 
-## 8. Production Constraints
+# 3. Infrastructure Services
 
-- Ollama รันบน host (systemd) ไม่ใช่ container
-- Router ใช้ bridge network + extra_hosts: host.docker.internal:host-gateway
-- Open WebUI ต่อผ่าน router เท่านั้น
-- Tailscale-only access (no public port)
+The system runs via Docker Compose.
 
----
+Services include:
 
-## 9. Observability
+| Service    | Role                    |
+| ---------- | ----------------------- |
+| router     | API gateway + LLM proxy |
+| open-webui | chat interface          |
+| redis      | short-term memory       |
+| qdrant     | vector memory           |
+| prometheus | metrics                 |
+| grafana    | monitoring              |
 
-- Prometheus scrape router:8000/metrics (future)
-- Grafana พอร์ต 3001 (admin / admin123)
-- Planned metrics: request_total, cache_hit_ratio, gemini_fallback_rate, model_probe_success
+LLM inference is executed through:
 
----
-
-## 10. Known Issues & Mitigations (Current)
-
-| Issue                        | Status     | Mitigation / Next Step                     |
-|------------------------------|------------|--------------------------------------------|
-| Router probe Ollama model ไม่เจอ (แต่ host มี) | Active     | เพิ่ม debug probe + fuzzy match ใน ollama_client.py |
-| Ollama เป็น host ไม่ใช่ container | By design  | ใช้ extra_hosts + healthcheck ตรง Ollama   |
-| Model name syntax mismatch   | Frequent   | ใช้ exact tag จาก ollama list + auto-try fallback tag |
-| Container ไม่มี curl/jq      | Temporary  | อัปเดต Dockerfile เพิ่ม debug tools        |
+Ollama (running on host)
 
 ---
 
-## 11. Security Model
+# 4. Router Responsibilities
 
-- Tailscale overlay network
-- Router bind to 0.0.0.0:8000 (แต่เข้าผ่าน Tailscale เท่านั้น)
-- Future: rate limiting, API key, prompt injection guard
+The Router acts as the **control plane**.
 
----
+Responsibilities:
 
-## 12. Scaling Strategy
+* LLM proxy
+* cache layer
+* agent gateway
+* tool execution interface
+* telemetry endpoint
 
-**Current**: Single GPU node  
-**Horizontal Plan**:
-- Router replicas + shared Redis/Qdrant
-- Ollama sharding (model เฉพาะต่อ node)
+Main endpoints:
 
----
-
-## 13. Extension Roadmap
-
-**Phase 0 – Current (Deployed)**  
-Open WebUI → Router → Ollama + Redis/Qdrant + monitoring
-
-**Phase 1 – Short-term**  
-- Model probe & auto-fix syntax  
-- Intent classifier (lightweight local)  
-- Pre-confidence estimation  
-- Gemini fallback logic
-
-**Phase 2 – Mid-term**  
-- Policy engine เต็มรูปแบบ  
-- Tool execution layer (local-first)  
-- Memory / RAG enhancement
-
-**Phase 3 – Long-term**  
-- Planner + self-reflection  
-- Multi-model arbitration  
-- Auto model management (pull/unload)
+```
+POST /api/generate
+POST /api/agent/run
+```
 
 ---
 
-## 14. Design Philosophy
+# 5. Agent Architecture
 
-- Deterministic over magic  
-- Cache before compute  
-- Local before cloud  
-- Explicit routing over implicit orchestration  
-- Extendable, not over-engineered
+Agents are implemented using CrewAI.
+
+There are two types:
+
+### Control Agents
+
+| Agent   | Purpose                  |
+| ------- | ------------------------ |
+| Planner | Break goals into tasks   |
+| Manager | Coordinate worker agents |
+
+### Worker Agents
+
+| Agent      | Role                          |
+| ---------- | ----------------------------- |
+| Researcher | data collection               |
+| Engineer   | coding and automation         |
+| Reviewer   | validation and output quality |
+
+Agents collaborate through **task orchestration**.
 
 ---
-# Agent Rules
 
-- Always create a plan first
-- Show diff before modifying files
-- Run tests after changes
-- Use bash commands, not fish
-- If tool fails (e.g., multi_edit invalid): Retry with fixed params. Remove duplicate edits.
-- Max retries per step: 3
+# 6. Task Execution Model
 
-**END OF FILE – v1.1 – March 2026**
+Execution pipeline:
+
+```
+Goal
+ ↓
+Planner
+ ↓
+Task List
+ ↓
+Manager
+ ↓
+Crew Workers
+ ↓
+Tool Execution
+ ↓
+Memory Storage
+ ↓
+Final Result
+```
+
+Example:
+
+User goal:
+
+```
+Analyze EV market Thailand
+```
+
+Planner output:
+
+```
+1 research EV adoption data
+2 analyze policy incentives
+3 create investment model
+4 produce report
+```
+
+---
+
+# 7. Tool Execution System
+
+Agents can interact with tools through a controlled sandbox.
+
+Available tool categories:
+
+### System Tools
+
+* filesystem
+* shell
+* process management
+
+### Development Tools
+
+* git
+* docker
+* repository analysis
+
+### Research Tools
+
+* web search
+* web scraping
+
+### Data Tools
+
+* parsing
+* transformation
+* analytics
+
+All commands are validated through **allowlists** before execution.
+
+Example:
+
+```
+docker ps
+docker logs
+git clone
+ls
+cat
+```
+
+Unsafe commands are rejected.
+
+---
+
+# 8. Workspace
+
+Agents operate within a dedicated workspace directory.
+
+```
+crew/workspace/
+```
+
+This directory allows agents to:
+
+* generate reports
+* write scripts
+* store intermediate files
+* run analysis
+
+Example outputs:
+
+```
+workspace/report.md
+workspace/analysis.py
+workspace/data.json
+```
+
+---
+
+# 9. Memory Architecture
+
+Two memory layers exist.
+
+### L1 Memory — Redis
+
+Purpose:
+
+* conversation context
+* agent state
+* task outputs
+* cache
+
+Characteristics:
+
+* low latency
+* ephemeral
+
+---
+
+### L2 Memory — Qdrant
+
+Purpose:
+
+* long-term knowledge
+* semantic retrieval
+* solution history
+
+Flow:
+
+```
+prompt
+↓
+embedding
+↓
+vector search
+↓
+context injection
+```
+
+---
+
+# 10. Autonomous Execution
+
+Agents may run multiple reasoning cycles.
+
+Loop pattern:
+
+```
+plan
+execute
+observe
+reflect
+repeat
+```
+
+This allows the system to solve multi-step tasks.
+
+Maximum iterations are configurable per request.
+
+---
+
+# 11. Monitoring
+
+System metrics are exported to:
+
+Prometheus
+
+Dashboards are visualized via:
+
+Grafana
+
+Recommended metrics:
+
+```
+agent_tasks_total
+agent_tool_calls_total
+agent_failures_total
+router_requests_total
+cache_hit_ratio
+```
+
+---
+
+# 12. Security Model
+
+Security is enforced through:
+
+* container isolation
+* command allowlists
+* tool sandboxing
+* filesystem restrictions
+
+Agents cannot execute arbitrary system commands.
+
+Workspace scope is limited.
+
+---
+
+# 13. Scaling Strategy
+
+Current mode:
+
+single node deployment
+
+Future horizontal scaling:
+
+```
+multiple routers
+shared redis
+shared qdrant
+load balancer
+distributed inference nodes
+```
+
+---
+
+# 14. Performance Expectations
+
+Typical resource usage:
+
+| Component     | Memory  |
+| ------------- | ------- |
+| Open WebUI    | ~400 MB |
+| Router        | ~50 MB  |
+| Redis         | ~10 MB  |
+| Qdrant        | ~150 MB |
+| CrewAI Agents | ~200 MB |
+
+Total base footprint:
+
+~800 MB (excluding LLM models)
+
+---
+
+# 15. Development Workflow
+
+Recommended development process:
+
+1. implement tool
+2. register tool with agent
+3. test agent behavior
+4. observe telemetry
+5. refine prompts and roles
+
+---
+
+# 16. Repository Layout
+
+```
+ai-router-stack/
+
+docker-compose.production.yml
+AGENTS.md
+
+router/
+
+crew/
+  agents/
+  tools/
+  planner/
+  memory/
+  workspace/
+
+monitoring/
+```
+
+---
+
+# 17. Design Philosophy
+
+System principles:
+
+* local-first AI
+* deterministic execution
+* tool-augmented reasoning
+* transparent orchestration
+* secure automation
+
+Agents should assist with:
+
+* development
+* research
+* operations
+* automation
+
+---
+
+END OF FILE

@@ -40,7 +40,7 @@ logger = logging.getLogger("router")
 
 OLLAMA_URL = os.getenv(
     "OLLAMA_BASE_URL",
-    "http://host.docker.internal:11434"
+    "http://ollama:11434"
 )
 
 REDIS_URL = os.getenv(
@@ -495,6 +495,25 @@ async def metrics():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/health/llm")
+async def llm_health():
+    """Check if Ollama is responsive."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{OLLAMA_URL}/api/tags")
+            if resp.status_code == 200:
+                return {"ollama": "ok", "models": len(resp.json().get("models", []))}
+            return JSONResponse(
+                status_code=503,
+                content={"ollama": "error", "status_code": resp.status_code}
+            )
+    except Exception as e:
+        return JSONResponse(
+            status_code=503, 
+            content={"ollama": "down", "error": str(e)}
+        )
 
 
 @app.get("/api/tags")
@@ -953,3 +972,59 @@ async def proxy_generate(request: Request):
         status_code=502,
         content={"error": "Ollama unavailable", "detail": str(last_exc)},
     )
+
+
+# ===============================
+# MULTI-AGENT ENDPOINT (CrewAI)
+# ===============================
+
+try:
+    from functools import partial
+    from crew.crew import AgentRequest as CrewAgentRequest
+    from crew.crew import run_crew
+
+    AGENT_RUN_TOTAL = Counter(
+        "agent_run_total",
+        "Total CrewAI multi-agent runs",
+        ["status"],
+    )
+
+    @app.post("/api/agent/run")
+    async def run_multi_agent(request: Request, body: CrewAgentRequest):
+        """
+        Run a 3-agent CrewAI pipeline (researcher → engineer → reviewer).
+
+        Accepts JSON:
+          - topic (str, required): subject to analyze
+          - goal  (str, optional): desired outcome
+          - model (str, optional): Ollama model override
+          - use_cache (bool, optional): return Redis-cached result if available (default true)
+          - max_iterations (int, optional): 1-10 (default 5)
+        """
+        security_error = await enforce_auth_and_rate_limit(request)
+        if security_error is not None:
+            return security_error
+
+        logger.info(f"Agent run requested | topic={body.topic[:60]} | model={body.model or 'default'}")
+
+        loop = asyncio.get_event_loop()
+        try:
+            result = await loop.run_in_executor(None, partial(run_crew, body))
+            AGENT_RUN_TOTAL.labels(status="success").inc()
+            return JSONResponse(content=result)
+        except Exception as e:
+            logger.exception("Agent run failed")
+            AGENT_RUN_TOTAL.labels(status="error").inc()
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Agent execution failed", "detail": str(e)},
+            )
+
+    logger.info("CrewAI multi-agent endpoint registered at POST /api/agent/run")
+
+except ImportError as _crew_import_err:
+    logger.warning(
+        f"CrewAI not available — /api/agent/run will not be registered. "
+        f"Install crewai to enable: {_crew_import_err}"
+    )
+

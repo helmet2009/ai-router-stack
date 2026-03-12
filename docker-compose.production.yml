@@ -10,13 +10,16 @@ volumes:
   openwebui_data:
   prometheus_data:
   grafana_data:
+  ollama_data:
 
 services:
   # =========================
   # ROUTER
   # =========================
   router:
-    build: ./router
+    build:
+      context: .
+      dockerfile: router/Dockerfile
     container_name: ai-router
     restart: unless-stopped
     env_file:
@@ -38,22 +41,51 @@ services:
       retries: 6
       start_period: 15s
     environment:
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_BASE_URL=http://ollama:11434
       - REDIS_URL=redis://redis:6379
       - QDRANT_URL=http://qdrant:6333
       - AUTH_BYPASS_CIDRS=172.18.0.0/16  # Allow all Docker internal IPs
       - EMBED_MODEL=nomic-embed-text
       - SEMANTIC_THRESHOLD=0.9
       - SEMANTIC_MAX_AGE_SECONDS=86400
+      - WORKSPACE_DIR=/app/crew/workspace
       # Gemini fallback configuration (Phase 2)
       - GEMINI_API_ENDPOINT=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL=gemini-2.0-flash
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./crew/workspace:/app/crew/workspace
     depends_on:
       - redis
       - qdrant
+      - ollama
+
+  # =========================
+  # OLLAMA (Local LLM Runtime)
+  # =========================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    networks:
+      - ai-net
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 
   # =========================
   # OPEN WEBUI

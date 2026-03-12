@@ -7,3 +7,13 @@ prometheus_client
 qdrant-client
 simpleeval
 python-multipart
+# CrewAI multi-agent
+crewai>=0.67.1
+crewai-tools>=0.14.0
+langchain-ollama>=0.2.0
+langchain-community>=0.3.0
+litellm>=1.51.0
+duckduckgo-search
+beautifulsoup4
+pydantic-settings
+python-dotenv
